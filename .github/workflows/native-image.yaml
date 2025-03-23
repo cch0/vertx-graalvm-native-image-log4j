@@ -1,0 +1,185 @@
+name: Native Image Build
+
+on:
+  workflow_dispatch:
+#  push:
+#    # enable triggering for the following paths and files
+#    paths:
+#      - '.github/workflows/native-image.yaml'
+
+
+env:
+  ARTIFACT_NAME: "vertx-native"
+
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build_native_image:
+    name: ${{ matrix.profile.platform }}-${{ matrix.profile.os }}
+
+    runs-on: ${{ matrix.profile.runner }}
+
+    permissions: write-all
+
+    strategy:
+      matrix:
+        java-version: ['21']
+        profile: [
+          {
+            runner: ubuntu-24.04,
+            platform: x86_64,
+            os: linux
+          },
+          {
+            runner: macos-15-xlarge,
+            platform: arm64,
+            os: darwin
+          },
+          {
+            runner: windows-2022,
+            platform: x86_64,
+            os: windows
+          }
+        ]
+
+    steps:
+      - name: Echo
+        run: |
+          uname -a
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+        id: checkout-source
+
+
+
+
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: ${{ matrix.java-version }}
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          native-image-job-reports: 'true'
+          native-image-pr-reports: 'true'
+
+      - name: Echo
+        if: matrix.profile.os != 'windows'
+        run: |
+          echo "===> echo GRAALVM_HOME"
+          echo "GRAALVM_HOME: $GRAALVM_HOME"
+          
+          echo "===> echo JAVA_HOME"
+          echo "JAVA_HOME: $JAVA_HOME"
+          
+          echo "===> echo java version"
+          java --version
+          
+          echo "===> echo native-image version"
+          native-image --version
+
+
+      - name: Add GITHUB_SHORT_SHA env property with commit short sha
+        id: add-git-short-sha
+        run: |
+          GITHUB_SHORT_SHA=$(echo ${GITHUB_SHA} | cut -c1-8)
+          echo "GITHUB_SHORT_SHA=$GITHUB_SHORT_SHA"
+          echo "GITHUB_SHORT_SHA=$GITHUB_SHORT_SHA" >> $GITHUB_ENV
+
+
+      - name: Extract version number from pom.xml file
+        id: extract-version
+        if: ${{ github.ref != 'refs/heads/main' }}
+        run: |
+          # Extract version number from pom.xml file.
+          VERSION=$(mvn --no-transfer-progress help:evaluate -Dexpression=project.version -q -DforceStdout)
+
+          # Strip off of the word "-SNAPSHOT" if it exists.
+          VERSION=$(echo $VERSION | sed -e 's/-SNAPSHOT//')
+
+          # Construct the final version number
+          VERSION=$VERSION-$GITHUB_SHORT_SHA
+
+          echo "Setting VERSION environment variable with value: $VERSION"
+          echo "VERSION is $VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+          # add to outputs
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+
+      - name: Extract version number from pom.xml file
+        id: extract-version-main
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          # update pom.xml files to remove '-SNAPSHOT'
+          mvn --no-transfer-progress build-helper:parse-version versions:set \
+            -DnewVersion=\${parsedVersion.majorVersion}.\${parsedVersion.minorVersion}.0
+
+          # Extract version number from pom.xml file.
+          VERSION=$(mvn --no-transfer-progress help:evaluate -Dexpression=project.version -q -DforceStdout)
+
+          echo "Setting VERSION environment variable with value: $VERSION"
+          echo "VERSION is $VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+          # add to outputs
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+
+      - name: Echo (Windows)
+        if: matrix.profile.os == 'windows'
+        shell: powershell
+        run: |
+          echo "===> echo GRAALVM_HOME"
+          echo "GRAALVM_HOME: $GRAALVM_HOME"
+          
+          echo "===> echo JAVA_HOME"
+          echo "JAVA_HOME: $JAVA_HOME"
+          
+          echo "===> echo java version"
+          java --version
+          
+          echo "===> echo native-image version"
+          native-image --version          
+
+      - name: Build native image
+        run: |
+          mvn -e --batch-mode --no-transfer-progress native:compile
+
+
+      - name: Rename executable
+        run: |
+          echo "===> create artifacts directory"
+          mkdir -p artifacts
+          
+          echo "===> list build artifact"
+          ls -l artifacts
+          
+          echo "===> copy build artifact"
+          cp ./target/${{ env.ARTIFACT_NAME }} artifacts/${{ env.ARTIFACT_NAME }}-${{ matrix.profile.platform }}-${{ matrix.profile.os }}-${{ env.VERSION }}
+          
+          echo "===> list build artifact again"
+          ls -l artifacts
+
+
+      - name: Upload native image as a Github artifact
+        uses: actions/upload-artifact@v4
+        if: matrix.profile.os != 'windows'
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-${{ matrix.profile.platform }}-${{ matrix.profile.os }}-${{ env.VERSION }}
+          path: |
+            artifacts/${{ env.ARTIFACT_NAME }}-${{ matrix.profile.platform }}-${{ matrix.profile.os }}-${{ env.VERSION }}
+          retention-days: 90
+
+
+      - name: Upload native image as a Github artifact (Windows)
+        uses: actions/upload-artifact@v4
+        if: matrix.profile.os == 'windows'
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-${{ matrix.profile.platform }}-${{ matrix.profile.os }}-${{ env.VERSION }}
+          path: |
+            artifacts/${{ env.ARTIFACT_NAME }}-${{ matrix.profile.platform }}-${{ matrix.profile.os }}-${{ env.VERSION }}.exe
+          retention-days: 90
